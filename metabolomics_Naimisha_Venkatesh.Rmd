@@ -1,0 +1,607 @@
+---
+title: "Metabolomics: NAT16 F63S Variant and Histidine Metabolism in CKD"
+author: "Naimisha Venkatesh"
+date: "November 2025"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+**All data in this notebook are simulated.** 
+# Setup
+
+```{r install_packages, echo=TRUE}
+#packages installation
+required_packages <- c("ggplot2", "dplyr", "tidyr", "patchwork", "ggpubr", 
+                       "pheatmap", "igraph", "ggraph", "reshape2")
+
+# Check and install missing packages
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+
+if(length(missing_packages) > 0) {
+  cat("Installing missing packages:", paste(missing_packages, collapse = ", "), "\n")
+  install.packages(missing_packages, dependencies = TRUE)
+  cat("Package installation complete\n\n")
+} else {
+  cat("All required packages are already installed\n\n")
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+sample_data$Group <- factor(sample_data$Group, 
+                            levels = c("Healthy_WT", "Healthy_Variant", 
+                                      "CKD_WT", "CKD_Variant"))
+
+group_colors <- c("Healthy_WT" = "#2E86AB", 
+                  "Healthy_Variant" = "#A23B72",
+                  "CKD_WT" = "#F18F01", 
+                  "CKD_Variant" = "#C73E1D")
+
+
+```
+
+# Simulated data
+
+## Sample table
+
+Four groups of 30 samples each, crossing genotype (WT or F63S variant) with disease status (healthy or CKD).
+
+```{r simulate_samples}
+
+set.seed(123)
+n_samples <- 120 #30 samples for each group
+
+sample_data <- data.frame(SAMPLE_ID = paste0("S",1:n_samples), Group=rep(c("Healthy_WT","Healthy_Variant","CKD_WT","CKD_Variant"),each=30),Genotype = rep(c("WT", "Variant", "WT", "Variant"), each = 30),Disease = rep(c("Healthy", "Healthy", "CKD", "CKD"), each = 30))
+
+#factor levels
+sample_data$Group <- factor(sample_data$Group, 
+                            levels = c("Healthy_WT", "Healthy_Variant", 
+                                      "CKD_WT", "CKD_Variant"))
+sample_data
+```
+
+## Gene expression
+
+Simulated TPM-like expression values for NAT16 and five related genes: HAL, CARNS1, HDC, CNDP2, and NAT8L. Group means encode the expected effects, including reduced NAT16 in variant carriers and compensatory HAL upregulation in CKD.
+
+```{r gene_expression, echo=TRUE}
+genes <- c("NAT16", "HAL", "CARNS1", "HDC", "CNDP2", "NAT8L")
+gene_expression <- data.frame(SAMPLE_ID = sample_data$SAMPLE_ID,
+                              NAT16 = c(
+    rnorm(30, mean = 50, sd = 8),   # Healthy WT
+    rnorm(30, mean = 35, sd = 7),   # Healthy Variant (30% reduction)
+    rnorm(30, mean = 45, sd = 9),   # CKD WT
+    rnorm(30, mean = 25, sd = 6)    # CKD Variant (50% reduction)
+  ),
+  
+  HAL = c(
+    rnorm(30, mean = 30, sd = 5),
+    rnorm(30, mean = 35, sd = 6),
+    rnorm(30, mean = 40, sd = 7),
+    rnorm(30, mean = 55, sd = 8)    # Compensatory upregulation
+  ),
+  
+  CARNS1 = c(
+    rnorm(30, mean = 40, sd = 6),
+    rnorm(30, mean = 38, sd = 7),
+    rnorm(30, mean = 35, sd = 6),
+    rnorm(30, mean = 30, sd = 5)
+  ),
+  
+  HDC = c(
+    rnorm(30, mean = 25, sd = 4),
+    rnorm(30, mean = 28, sd = 5),
+    rnorm(30, mean = 32, sd = 6),
+    rnorm(30, mean = 38, sd = 7)    # Upregulated in CKD
+  ),
+  
+  CNDP2 = c(
+    rnorm(30, mean = 35, sd = 5),
+    rnorm(30, mean = 37, sd = 6),
+    rnorm(30, mean = 42, sd = 7),
+    rnorm(30, mean = 45, sd = 8)
+  ),
+  
+  NAT8L = c(
+    rnorm(30, mean = 45, sd = 7),
+    rnorm(30, mean = 40, sd = 6),
+    rnorm(30, mean = 38, sd = 7),
+    rnorm(30, mean = 32, sd = 6)
+  )
+)
+```
+
+## Metabolites
+
+N-acetylhistidine and histidine are drawn directly from group-specific distributions. The remaining metabolites are calculated from the simulated gene expression plus noise, so that downstream gene-metabolite correlations are structured rather than random.
+
+```{r metabolite_data, echo=TRUE}
+metabolite_data <- data.frame(
+  SAMPLE_ID = sample_data$SAMPLE_ID,
+  
+  # Primary metabolites (targeted metabolomics)
+  N_Acetylhistidine = c(
+    rnorm(30, mean = 15.2, sd = 2.3),  # Healthy WT
+    rnorm(30, mean = 9.8, sd = 1.8),   # Healthy Variant (35% reduction)
+    rnorm(30, mean = 8.5, sd = 2.1),   # CKD WT (44% reduction)
+    rnorm(30, mean = 4.2, sd = 1.5)    # CKD Variant (72% reduction)
+  ),
+  
+  Histidine = c(
+    rnorm(30, mean = 78, sd = 12),     # Healthy WT
+    rnorm(30, mean = 82, sd = 15),     # Healthy Variant
+    rnorm(30, mean = 95, sd = 18),     # CKD WT (elevated)
+    rnorm(30, mean = 118, sd = 22)     # CKD Variant (highly elevated)
+  ),
+  
+  # Link metabolites to gene expression for realistic correlations
+  Carnosine = gene_expression$CARNS1 * 0.4 - (gene_expression$CNDP2 * 0.2) + rnorm(n_samples, 0, 3),
+  Histamine = gene_expression$HDC * 0.25 + rnorm(n_samples, 0, 1.5),
+  Urocanate = gene_expression$HAL * 0.35 + rnorm(n_samples, 0, 2),
+  
+  Methylhistidine_1 = 25 + (120 - gene_expression$NAT16) * 0.15 + rnorm(n_samples, 0, 2),
+  Methylhistidine_3 = 28 + (120 - gene_expression$NAT16) * 0.18 + rnorm(n_samples, 0, 2.5),
+  
+  # Oxidative stress and inflammation markers
+  Oxidative_Stress = 50 - (gene_expression$NAT16 * 0.3) - (gene_expression$CARNS1 * 0.2) + rnorm(n_samples, 0, 4),
+  PGE2 = 15 + (sample_data$Disease == "CKD") * 8 + rnorm(n_samples, 0, 2),
+  MDA = 12 + (sample_data$Disease == "CKD") * 6 + rnorm(n_samples, 0, 1.5)
+)
+
+# Calculate ratio
+metabolite_data$Ratio <- metabolite_data$Histidine / metabolite_data$N_Acetylhistidine
+
+# Generate eGFR (kidney function)
+metabolite_data$eGFR <- c(
+  rnorm(30, mean = 95, sd = 10),   # Healthy WT
+  rnorm(30, mean = 92, sd = 12),   # Healthy Variant
+  rnorm(30, mean = 35, sd = 8),    # CKD WT
+  rnorm(30, mean = 28, sd = 7)     # CKD Variant
+)
+
+# Merge all datasets
+integrated_data <- sample_data %>%
+  left_join(gene_expression, by = "SAMPLE_ID") %>%
+  left_join(metabolite_data, by = "SAMPLE_ID")
+
+# Print dataset
+metabolite_data
+```
+
+# Figures
+
+## Figure 1: Metabolite levels by group
+
+Boxplots showing which metabolites increase or decrease in each group, with t-test comparisons between healthy-WT and CKD-variant. Panel D relates N-acetylhistidine to kidney function.
+
+```{r figure1_boxplots, echo=TRUE, warning=FALSE, message=FALSE}
+# Panel A: N-acetylhistidine levels
+plot_A <- ggplot(integrated_data, aes(x = Group, y = N_Acetylhistidine, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "A. N-Acetylhistidine Levels",
+       y = "N-Acetylhistidine (μM)",
+       x = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  stat_compare_means(comparisons = list(c("Healthy_WT", "CKD_Variant")),
+                     label = "p.signif", method = "t.test")
+
+# Panel B: Histidine levels
+plot_B <- ggplot(integrated_data, aes(x = Group, y = Histidine, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "B. Histidine Levels",
+       y = "Histidine (μM)",
+       x = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  stat_compare_means(comparisons = list(c("Healthy_WT", "CKD_Variant")),
+                     label = "p.signif", method = "t.test")
+
+# Panel C: Ratio
+plot_C <- ggplot(integrated_data, aes(x = Group, y = Ratio, fill = Group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  scale_fill_manual(values = group_colors) +
+  labs(title = "C. Histidine/N-Acetylhistidine Ratio",
+       y = "His/N-AcHis Ratio",
+       x = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  stat_compare_means(comparisons = list(c("Healthy_WT", "CKD_Variant")),
+                     label = "p.signif", method = "t.test")
+
+# Panel D: Correlation with eGFR
+plot_D <- ggplot(integrated_data, aes(x = eGFR, y = N_Acetylhistidine, color = Group)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+  scale_color_manual(values = group_colors) +
+  labs(title = "D. Correlation with Kidney Function",
+       x = "eGFR (mL/min/1.73m²)",
+       y = "N-Acetylhistidine (μM)") +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
+
+# Combine all panels
+figure_1 <- (plot_A | plot_B) / (plot_C | plot_D) +
+  plot_annotation(
+    title = "NAT16 Variant Effects on Histidine Metabolism",
+    subtitle = "Metabolite levels across health status and genotype",
+    theme = theme(plot.title = element_text(size = 14, face = "bold"))
+  )
+
+print(figure_1)
+
+```
+
+## Figure 2A: Gene-metabolite correlation heatmap
+
+Pearson correlations between the six genes and eight metabolites, with per-pair `cor.test` p-values shown as significance stars and both axes hierarchically clustered. Pairs exceeding |r| > 0.5 at p < 0.05 are tabulated above the heatmap.
+
+```{r figure2a_heatmap, echo=TRUE, warning=FALSE, message=FALSE}
+gene_matrix <- integrated_data %>% select(all_of(genes))
+metabolite_matrix <- integrated_data %>% 
+  select(N_Acetylhistidine, Histidine, Carnosine, Histamine, Urocanate,
+         Methylhistidine_1, Methylhistidine_3, Oxidative_Stress)
+
+# Calculate correlation matrix
+gene_metabolite_cor <- cor(gene_matrix, metabolite_matrix, method = "pearson")
+
+# Calculate p-values
+cor_pvalues <- matrix(NA, nrow = nrow(gene_metabolite_cor), ncol = ncol(gene_metabolite_cor))
+rownames(cor_pvalues) <- rownames(gene_metabolite_cor)
+colnames(cor_pvalues) <- colnames(gene_metabolite_cor)
+
+for(i in 1:nrow(gene_metabolite_cor)) {
+  for(j in 1:ncol(gene_metabolite_cor)) {
+    test <- cor.test(gene_matrix[,i], metabolite_matrix[,j])
+    cor_pvalues[i,j] <- test$p.value
+  }
+}
+
+# Identify significant correlations
+significant_cors <- which(abs(gene_metabolite_cor) > 0.5 & cor_pvalues < 0.05, arr.ind = TRUE)
+sig_cor_df <- data.frame(
+  Gene = rownames(gene_metabolite_cor)[significant_cors[,1]],
+  Metabolite = colnames(gene_metabolite_cor)[significant_cors[,2]],
+  Correlation = gene_metabolite_cor[significant_cors],
+  P_value = cor_pvalues[significant_cors]
+)
+
+cat("\n=== Significant Gene-Metabolite Correlations (|r| > 0.5, p < 0.05) ===\n")
+print(sig_cor_df %>% arrange(desc(abs(Correlation))))
+cat("\n")
+
+# Create significance annotation matrix
+sig_matrix <- ifelse(cor_pvalues < 0.001, "***",
+                     ifelse(cor_pvalues < 0.01, "**",
+                            ifelse(cor_pvalues < 0.05, "*", "")))
+
+# Clean column names for display
+colnames(gene_metabolite_cor) <- gsub("_", "-", colnames(gene_metabolite_cor))
+colnames(sig_matrix) <- gsub("_", "-", colnames(sig_matrix))
+
+pheatmap(gene_metabolite_cor,
+         display_numbers = sig_matrix,
+         number_color = "black",
+         color = colorRampPalette(c("#2E86AB", "white", "#C73E1D"))(100),
+         breaks = seq(-1, 1, length.out = 101),
+         main = "Visualization 2A: Gene-Metabolite Correlation Heatmap",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         fontsize = 11,
+         fontsize_number = 10,
+         angle_col = 45,
+         border_color = "grey60")
+
+
+```
+
+## Figure 2A: Volcano plot
+
+A volcano plot of 150 metabolites contrasting CKD-variant against healthy-WT. Ten pathway-relevant metabolites are given fold changes and p-values reflecting the expected direction of change; the remaining 140 are background, generated randomly to give the plot realistic density.
+
+```{r volcano_plot, warning=FALSE, message=FALSE}
+set.seed(123)
+n_metabolites <- 150
+
+metabolite_names <- c(
+  "N-Acetylhistidine", "Carnosine", "Histidine", "1-Methylhistidine",
+  "3-Methylhistidine", "Histamine", "8-OHdG", "MDA", "PGE2", "PGF2α",
+  paste0("Metabolite_", 1:(n_metabolites - 10))
+)
+
+# Generate fold changes (log2)
+log2FC <- rnorm(n_metabolites, mean = 0, sd = 0.8)
+log2FC[1] <- log2(1/3.2)
+log2FC[2] <- log2(1/1.8)
+log2FC[3] <- log2(1.5)
+log2FC[4] <- log2(1.7)
+log2FC[5] <- log2(1.7)
+log2FC[7] <- log2(2.1)
+log2FC[8] <- log2(2.1)
+log2FC[9] <- log2(1.9)
+log2FC[10] <- log2(1.9)
+
+# Generate p-values
+p_values <- runif(n_metabolites, 0.001, 0.5)
+p_values[1] <- 0.0001
+p_values[2] <- 0.02
+p_values[3] <- 0.001
+p_values[4] <- 0.005
+p_values[5] <- 0.005
+p_values[7] <- 0.0005
+p_values[8] <- 0.0005
+p_values[9] <- 0.001
+p_values[10] <- 0.001
+
+volcano_data <- data.frame(
+  Metabolite = metabolite_names,
+  log2FC = log2FC,
+  pvalue = p_values,
+  neg_log10p = -log10(p_values)
+)
+
+volcano_data <- volcano_data %>%
+  mutate(
+    Category = case_when(
+      Metabolite %in% c("N-Acetylhistidine", "Carnosine", "Histidine", 
+                        "1-Methylhistidine", "3-Methylhistidine") ~ "NAT16-related",
+      Metabolite %in% c("8-OHdG", "MDA") ~ "Oxidative stress",
+      Metabolite %in% c("PGE2", "PGF2α") ~ "Inflammation",
+      abs(log2FC) > 1 & pvalue < 0.05 ~ "Significant",
+      TRUE ~ "Not significant"
+    ),
+    Label = ifelse(
+      Metabolite %in% c("N-Acetylhistidine", "Carnosine", "Histidine", 
+                        "1-Methylhistidine", "8-OHdG", "PGE2"),
+      Metabolite, ""
+    )
+  )
+
+volcano_plot <- ggplot(volcano_data, aes(x = log2FC, y = neg_log10p)) +
+  geom_point(aes(color = Category, size = Category), alpha = 0.6) +
+  scale_color_manual(
+    values = c(
+      "NAT16-related" = "#C73E1D",
+      "Oxidative stress" = "#F18F01",
+      "Inflammation" = "#A23B72",
+      "Significant" = "#2E86AB",
+      "Not significant" = "gray70"
+    )
+  ) +
+  scale_size_manual(
+    values = c(
+      "NAT16-related" = 3,
+      "Oxidative stress" = 2.5,
+      "Inflammation" = 2.5,
+      "Significant" = 2,
+      "Not significant" = 1.5
+    )
+  ) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray40") +
+  geom_text(aes(label = Label), hjust = -0.1, vjust = 0, size = 3, 
+            check_overlap = TRUE) +
+  labs(
+    title = "Metabolomic Signature of NAT16 F63S Variant in CKD",
+    subtitle = "CKD-Variant vs Healthy-WT",
+    x = "log2(Fold Change)",
+    y = "-log10(p-value)"
+  ) +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(face = "bold")
+  ) +
+  annotate("text", x = -2, y = 1, label = "Decreased", color = "gray40", size = 4) +
+  annotate("text", x = 2, y = 1, label = "Increased", color = "gray40", size = 4)
+
+print(volcano_plot)
+
+
+```
+
+## Figure 2B: Metabolic pathway diagram
+
+Fold change values are set the same way as in the volcano plot above. The diagram gives a visual map of how the NAT16 F63S variant is expected to disrupt histidine metabolism and trigger a downstream cascade.
+
+The decrease in N-acetylhistidine (blue, center) represents the primary enzymatic deficiency, while histidine accumulation (red, left) reflects substrate-product imbalance. Loss of N-acetylhistidine is proposed to lead to elevated oxidative stress (2.1-fold) and inflammation (1.9-fold), offering a candidate mechanism for increased CKD susceptibility in variant carriers.
+
+```{r pathway_diagram, warning=FALSE, message=FALSE}
+
+pathway_data <- data.frame(
+  Metabolite = c("Histidine", "N-Acetylhistidine", "Histamine", 
+                 "Carnosine", "Oxidative\nStress", "Inflammation"),
+  x = c(1, 3, 1.5, 1.5, 4, 4),
+  y = c(3, 3, 1.5, 4.5, 2, 4),
+  FoldChange = c(1.5, -3.2, 1.2, -1.8, 2.1, 1.9)
+)
+
+connections <- data.frame(
+  x = c(1, 1, 1, 3, 3),
+  y = c(3, 3, 3, 3, 3),
+  xend = c(3, 1.5, 1.5, 4, 4),
+  yend = c(3, 1.5, 4.5, 2, 4)
+)
+
+pathway_plot <- ggplot() +
+  geom_segment(data = connections, 
+               aes(x = x, y = y, xend = xend, yend = yend),
+               arrow = arrow(length = unit(0.3, "cm"), type = "closed"),
+               linewidth = 1, color = "gray40") +
+  annotate("text", x = 2, y = 3.3, label = "NAT16\n(F63S variant)", 
+           size = 3.5, fontface = "bold", color = "#C73E1D") +
+  geom_point(data = pathway_data, 
+             aes(x = x, y = y, fill = FoldChange, size = abs(FoldChange)),
+             shape = 21, color = "black", stroke = 1.5) +
+  scale_fill_gradient2(
+    low = "#2E86AB", mid = "white", high = "#C73E1D",
+    midpoint = 0, limits = c(-3.5, 2.5),
+    name = "Fold Change"
+  ) +
+  scale_size_continuous(range = c(8, 15), guide = "none") +
+  geom_text(data = pathway_data, 
+            aes(x = x, y = y, label = Metabolite),
+            size = 3, fontface = "bold") +
+  labs(
+    title = "Integrated Metabolic Pathway Analysis",
+    subtitle = "NAT16 dysfunction triggers cascade of metabolic changes"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5),
+    legend.position = "right"
+  ) +
+  coord_fixed(ratio = 1) +
+  xlim(0.5, 4.5) +
+  ylim(0.5, 5)
+
+print(pathway_plot)
+
+
+```
+
+# Alternative visualizations
+
+## Figure 3: Scatter plots by disease status
+
+The NAT16-metabolite relationship shown separately for healthy and CKD samples, faceted by metabolite and colored by genotype.
+
+```{r figure3_facet_scatter, warning=FALSE, message=FALSE}
+# Select key metabolites to visualize
+key_metabolites <- c("N_Acetylhistidine", "Histidine", "Carnosine", 
+                     "Oxidative_Stress", "Histamine", "Urocanate")
+
+# Reshape data for faceting
+plot_data <- integrated_data %>%
+  select(SAMPLE_ID, Group, Disease, Genotype, NAT16, all_of(key_metabolites)) %>%
+  pivot_longer(cols = all_of(key_metabolites), 
+               names_to = "Metabolite", 
+               values_to = "Concentration")
+
+# Create faceted scatter plot
+facet_scatter <- ggplot(plot_data, aes(x = NAT16, y = Concentration, color = Genotype)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  facet_grid(Metabolite ~ Disease, scales = "free_y") +
+  scale_color_manual(values = c("WT" = "#2E86AB", "Variant" = "#C73E1D")) +
+  labs(
+    title = "NAT16 Expression vs Metabolite Levels by Disease Status",
+    subtitle = "Shows how NAT16-metabolite relationships differ in CKD",
+    x = "NAT16 Expression (TPM)",
+    y = "Metabolite Concentration (μM)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold", size = 10),
+    legend.position = "bottom"
+  )
+
+print(facet_scatter)
+
+# Save
+ggsave("Figure3_FacetedScatter.png", facet_scatter, width = 12, height = 14, dpi = 300)
+```
+
+## Figure 4: Correlation coefficient plot
+
+Correlation strength for each NAT16-metabolite pair, computed separately in healthy and CKD samples to show how the relationships shift with disease.
+
+```{r figure4_cor_dotplot, warning=FALSE, message=FALSE}
+
+# Calculate correlations separately for Healthy and CKD
+calc_cors <- function(data, disease_status) {
+  subset_data <- data %>% filter(Disease == disease_status)
+  
+  gene_mat <- subset_data %>% select(all_of(genes))
+  met_mat <- subset_data %>% select(N_Acetylhistidine, Histidine, Carnosine, 
+                                    Histamine, Urocanate, Oxidative_Stress)
+  
+  cors <- cor(gene_mat, met_mat, method = "pearson")
+  
+  # Convert to long format
+  cors_long <- as.data.frame(cors) %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(-Gene, names_to = "Metabolite", values_to = "Correlation") %>%
+    mutate(Disease = disease_status)
+  
+  return(cors_long)
+}
+
+# Calculate for both groups
+library(tibble)
+healthy_cors <- calc_cors(integrated_data, "Healthy")
+ckd_cors <- calc_cors(integrated_data, "CKD")
+all_cors <- bind_rows(healthy_cors, ckd_cors)
+
+# Focus on NAT16 only for cleaner visualization
+nat16_cors <- all_cors %>% filter(Gene == "NAT16")
+
+# Create dot plot
+cor_dotplot <- ggplot(nat16_cors, aes(x = Correlation, y = Metabolite, color = Disease)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_line(aes(group = Metabolite), color = "gray70", linewidth = 0.5) +
+  scale_color_manual(values = c("Healthy" = "#2E86AB", "CKD" = "#C73E1D")) +
+  scale_x_continuous(limits = c(-1, 1), breaks = seq(-1, 1, 0.25)) +
+  labs(
+    title = "NAT16-Metabolite Correlations: Healthy vs CKD",
+    subtitle = "Shows how correlations change in disease state",
+    x = "Pearson Correlation Coefficient",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.major.y = element_line(color = "gray90"),
+    axis.text.y = element_text(size = 11, face = "bold")
+  )
+
+print(cor_dotplot)
+
+# Save
+ggsave("Figure4_CorrelationDotPlot.png", cor_dotplot, width = 10, height = 6, dpi = 300)
+```
+
+# Summary statistics and export
+
+Per-group means and standard deviations for the key metabolites and eGFR, a global correlation test between eGFR and N-acetylhistidine, and export of the merged data, correlation tables, and figures.
+
+```{r summary_stats, warning=FALSE, message=FALSE}
+summary_stats <- integrated_data %>%
+  group_by(Group) %>%
+  summarise(
+    N_AcHis_mean = mean(N_Acetylhistidine),
+    N_AcHis_sd = sd(N_Acetylhistidine),
+    His_mean = mean(Histidine),
+    His_sd = sd(Histidine),
+    Ratio_mean = mean(Ratio),
+    Ratio_sd = sd(Ratio),
+    eGFR_mean = mean(eGFR),
+    eGFR_sd = sd(eGFR)
+  )
+
+print(summary_stats)
+
+# Correlation analysis
+cor_test <- cor.test(integrated_data$eGFR, integrated_data$N_Acetylhistidine)
+cat("\nCorrelation between eGFR and N-Acetylhistidine:\n")
+cat(paste("r =", round(cor_test$estimate, 3), ", p-value =", 
+          format.pval(cor_test$p.value, digits = 3), "\n"))
+
+# Export data
+write.csv(gene_metabolite_cor, "gene_metabolite_correlations.csv", row.names = TRUE)
+write.csv(sig_cor_df, "significant_correlations.csv", row.names = FALSE)
+write.csv(integrated_data, "integrated_multiomics_data.csv", row.names = FALSE)
+# Save plots
+ ggsave("Figure1_BoxPlots.png", figure_1, width = 12, height = 10, dpi = 300)
+ ggsave("Figure2A_VolcanoPlot.png", volcano_plot, width = 10, height = 8, dpi = 300)
+ ggsave("Figure2B_PathwayDiagram.png", pathway_plot, width = 10, height = 8, dpi = 300)
+
+
+```
